@@ -1,0 +1,457 @@
+################################ Loading Libraries ###################################
+
+library(readxl)
+library(xts)
+library(actuar)
+library(fitdistrplus)
+library(QRM)
+library(copula)
+library(fMultivar)
+library(numDeriv)
+library(QRM)
+library(VineCopula)
+library(ggplot2)
+
+######################################################################################
+######################################################################################
+
+
+########################### (a) Load Data for Portfolio ##############################
+
+# load stock data
+sheetnames <- excel_sheets("ST429_data_group6.xlsx") # read all sheets from the excel file
+mylist <- suppressMessages(lapply(excel_sheets("ST429_data_group6.xlsx"), 
+                                  read_excel, path = "ST429_data_group6.xlsx")) 
+names(mylist) <- sheetnames
+
+# load S&P 500 data
+SP500<- mylist$`S&P 500`
+SP500_date<- as.Date(SP500$Date, formate= "%Y-%m-%d")
+SP500<-xts(SP500$Price,order.by = SP500_date)
+
+# load stock data
+stock <- cbind(SP500_date, mylist$AWK$`Adj Close`, mylist$FTEK$`Adj Close`, 
+               mylist$GE$`Adj Close`, mylist$WTRG$`Adj Close`, mylist$TSLA$`Adj Close`,
+               mylist$AAL$`Adj Close`, mylist$EGLE$`Adj Close`, mylist$ED$`Adj Close`,
+               mylist$XEL$`Adj Close`, mylist$F$`Adj Close`)
+colnames(stock)<-c("Date", sheetnames[-1])
+stock_xts <- xts(stock[,-1], order.by = SP500_date)
+
+
+############################## (b) Stock Price Analysis ##############################
+
+logprice<-log(stock_xts) # log return
+risk_factor<-diff(logprice)[2:nrow(logprice),] # risk factor change
+
+# log return of S&P 500 data
+SP500_logprice<-log(SP500)
+SP500_risk_factor <- diff(SP500_logprice)[2:nrow(SP500_logprice),]
+# plot log-returns of ten stocks and S&P 500
+plot.xts(merge(SP500_risk_factor, risk_factor[,1:5]), multi.panel = TRUE,
+         cex = 0.2,main = "", yaxis.same = FALSE,on = NA)
+plot.xts(merge(SP500_risk_factor, risk_factor[,6:10]), multi.panel = TRUE,
+         cex = 0.2, main = "", yaxis.same = FALSE,on = NA)
+
+
+############################# (c) Loss and Risk Measure ##############################
+
+lambda <- rep(1000, 10) # 1000 shares for each stock
+V0 <- sum(lambda * stock_xts[1,]) # initial value at t0
+tt <- nrow(stock_xts) # current time
+Vtt <- sum(lambda * stock_xts[tt,]) # current value of portfolio
+weights <- lambda * stock_xts[tt,]/Vtt # weights of each stock
+
+# function to fit loss
+loss.sim <- function(Xval, proportion, value){
+  # Xval: risk factor changes 
+  # proportion: weights of each stock
+  # value: value of portfolio
+  if (is.matrix(Xval)){
+    prod <- (exp(Xval)-1) %*% t(proportion) 
+  } else {
+    n <- length(Xval)
+    prod <- proportion * (exp(Xval)-1)
+  }
+  loss <- -value * prod
+  return(loss)
+}
+
+Loss_sim <- loss.sim(risk_factor, weights, Vtt) # loss of our portfolio
+
+Loss_positive <- Loss_sim[which(Loss_sim > 0)] # consider only positive losses
+summary(Loss_positive)
+hist(Loss_positive, breaks = 20, main = "" ,
+     xlab = "Positive Loss", family = "Times")
+
+# empirical distribution
+FLhat <- ecdf(Loss_positive)
+plot(FLhat)
+
+alpha <- c(seq(0.1,0.8,0.1), seq(0.9,1,0.01)) # confidence level
+
+# VaR and ES assuming empirical distribution
+VaR_empirical <- quantile(Loss_positive, alpha, na.rm = TRUE)
+ES_empirical <- rep(0, length(alpha))
+for(i in 1:length(alpha)) {
+  values <- Loss_positive[Loss_positive > VaR_empirical[i]]
+  ES_empirical[i] <- mean(values, na.rm = TRUE)
+}
+
+# fit pareto distribution
+pareto <- suppressWarnings(fitdist(Loss_positive, "pareto"))
+plot(pareto)
+
+alpha <- c(seq(0.1,0.8,0.1), seq(0.9,1,0.01)) # confidence level
+
+# VaR and ES assuming pareto distribution
+VaR_pareto <- qpareto(alpha, shape =pareto$estimate[1], scale =pareto$estimate[2])
+ES_pareto <- rep(0, length(alpha))
+for(i in 1:length(alpha)) {
+  values <- Loss_positive[Loss_positive > VaR_pareto[i]]
+  ES_pareto[i] <- mean(values, na.rm = TRUE)
+}
+
+par(family = "Times")
+plot(alpha, VaR_empirical, type = "l", lty = 1, xlab = expression(alpha), 
+     ylab = "Estimated Risk", col = "red") # true ES_alpha
+lines(alpha, ES_empirical, type = "l", lty = 1, col = "blue") # ES_alpha estimate
+lines(alpha, VaR_pareto, type = "l", lty = 2, col = "red") # true ES_alpha
+lines(alpha, ES_pareto, type = "l", lty = 2, col = "blue") # ES_alpha estimate
+
+legend("topleft", bty = "n", y.intersp = 1.2, lty = c(1,1,2,2), cex = 0.8,
+       col = c("red", "blue", "red", "blue"), 
+       legend = c(expression(VaR[alpha]^Empirical),
+                  expression(ES[alpha]^Empirical),
+                  expression(VaR[alpha]^Pareto),
+                  expression(ES[alpha]^Pareto)))
+
+# for empirical distribution
+# at alpha level 0.9
+VaR_empirical9 <- quantile(Loss_positive, 0.9, na.rm = TRUE)
+ES_empirical9 <- mean(Loss_positive[Loss_positive > VaR_empirical9])
+# at alpha level 0.95
+VaR_empirical95 <- quantile(Loss_positive, 0.95, na.rm = TRUE)
+ES_empirical95 <- mean(Loss_positive[Loss_positive > VaR_empirical95])
+# at alpha level 0.99
+VaR_empirical99 <- quantile(Loss_positive, 0.99, na.rm = TRUE)
+ES_empirical99 <- mean(Loss_positive[Loss_positive > VaR_empirical99])
+
+# for pareto distribution
+# at alpha level 0.9
+VaR_pareto9 <- qpareto(0.9, shape = pareto$estimate[1], scale = pareto$estimate[2])
+ES_pareto9  <- mean(Loss_positive[Loss_positive > VaR_pareto9])
+# at alpha level 0.95
+VaR_pareto95 <- qpareto(0.95, shape = pareto$estimate[1], scale = pareto$estimate[2])
+ES_pareto95 <- mean(Loss_positive[Loss_positive > VaR_pareto95])
+# at alpha level 0.99
+VaR_pareto99 <- qpareto(0.99, shape = pareto$estimate[1], scale = pareto$estimate[2])
+ES_pareto99 <- mean(Loss_positive[Loss_positive > VaR_pareto99])
+
+
+############################## (d) Dependence Structure ##############################
+
+# fit pairs to gaussian, t, gumbel, clayton, and frank copulas
+bestfit<- function(data1,data2){
+  # fix number of digits in outputs
+  options(digits = 6)
+  stockreturns<-merge(data1,data2)
+  X <- as.matrix(stockreturns)
+  # calculate losses(minus log-returns)
+  X <- X[X[,1]!=0 & X[,2] !=0,]*(-1)
+  # compute the empirical distribution of X
+  pseudoC <<- apply(X, 2, edf, adjust = 1)
+  a0<-as.numeric(c(cor(pseudoC,method = "kendall")[1,2],
+                   cor(pseudoC,method = "spearman")[1,2],NA,NA))
+  # set starting point
+  gatheta<-cor(pseudoC,method = "spearman")[1,2]
+  # fit copulas to data
+  copulaXGauss <<- fitCopula(normalCopula(dim = 2,dispstr = "un"),
+                             data = pseudoC,start=gatheta,method = "mpl")
+  a1<-as.numeric(c(tau(normalCopula(getTheta(copulaXGauss), dim = 2)),
+                   getTheta(copulaXGauss), copulaXGauss@loglik, AIC(copulaXGauss)))
+  copulaXt <<- fitCopula(tCopula(dim = 2,dispstr = "un"),
+                         data = pseudoC,hideWarnings=TRUE,method = "mpl")
+  a2<-as.numeric(c(tau(tCopula(getTheta(copulaXt)[1], df=getTheta(copulaXt)[2], 
+                               df.fixed = TRUE)), getTheta(copulaXt)[1],
+                   copulaXt@loglik, AIC(copulaXt)))
+  gtheta <<- iTau(gumbelCopula(dim = 2), cor(pseudoC,method="kendall")[1,2])
+  copulaXgumbel <<- fitCopula(gumbelCopula(dim=2), data = pseudoC, 
+                              start=gtheta, method = "mpl")
+  a3<-as.numeric(c(tau(gumbelCopula(param = getTheta(copulaXgumbel),dim = 2)),
+                   rho(gumbelCopula(param = getTheta(copulaXgumbel),dim = 2)),
+                   copulaXgumbel@loglik, AIC(copulaXgumbel)))
+  ctheta<<-iTau(claytonCopula(dim = 2),cor(pseudoC,method="kendall")[1,2])
+  copulaXclayton<<- tryCatch(fitCopula(claytonCopula(dim = 2),
+                                       data = pseudoC, start=ctheta,
+                                       method = "mpl"), error=function(e)NA)
+  a4<-as.numeric(c(tryCatch(tau(claytonCopula(param = getTheta(copulaXclayton),
+                                              dim = 2)), error=function(e)NA),
+                   tryCatch(rho(claytonCopula(param = getTheta(copulaXclayton),
+                                              dim = 2)),error=function(e)NA),
+                   tryCatch(copulaXclayton@loglik, error = function(e)NA),
+                   tryCatch(AIC(copulaXclayton), error = function(e)NA)))
+  ftheta <<- iTau(frankCopula(dim=2), cor(pseudoC,method = "kendall")[1,2])
+  copulaXfrank <<- fitCopula(frankCopula(dim = 2), data = pseudoC,
+                             start=ftheta, method = "mpl")
+  a5<-as.numeric(c(tau(frankCopula(param = getTheta(copulaXfrank),dim = 2)),
+                   rho(frankCopula(param = getTheta(copulaXfrank),dim = 2)),
+                   copulaXfrank@loglik, AIC(copulaXfrank)))
+  # return copulas with rank correlations, maximum log likelihood, and AIC
+  my_matrix<-rbind(a0,a1,a2,a3,a4,a5)
+  rownames(my_matrix)<-c("pseudoC","gauss","t","gumbel","clayton","frank")
+  colnames(my_matrix)<-c("Tau","Rho","max. loglike","AIC")
+  return(my_matrix)
+}
+
+# fit pair XEL and ED
+bestfit(risk_factor$XEL,risk_factor$ED)
+# compute the lower and upper tail dependence
+lambda1<-lambda(tCopula(param = getTheta(copulaXt)[1],
+                        df=getTheta(copulaXt)[2],df.fixed = TRUE))
+lambda1
+
+set.seed(123)
+# check the goodness of fit of the selected copula
+sim1<-rCopula(nrow(pseudoC),tCopula(param =getTheta(copulaXt)[1],
+                                    df=getTheta(copulaXt)[2],df.fixed = TRUE))
+par(mfrow=c(1,2),cex = 0.8)
+plot(pseudoC, xlab="XEL",ylab="ED",main="pseudo observations", family = "Times")
+plot(sim1, xlab="XEL",ylab="ED",main="simulations", family = "Times")
+# save the copula information in global environment for future use
+t1<-copulaXt
+
+# fit pair TSLA and F
+bestfit(risk_factor$TSLA,risk_factor$F)
+lambda2<-lambda(tCopula(param = getTheta(copulaXt)[1],
+                        df=getTheta(copulaXt)[2],df.fixed = TRUE))
+lambda2
+
+set.seed(123)
+sim2<-rCopula(nrow(pseudoC),tCopula(param = getTheta(copulaXt)[1],
+                                    df=getTheta(copulaXt)[2],df.fixed = TRUE))
+par(mfrow=c(1,2),cex = 0.8)
+plot(pseudoC, xlab="TSLA",ylab="F",main="pseudo observations", family = "Times")
+plot(sim2, xlab="TSLA",ylab="F",main="simulations", family = "Times")
+
+# fit pair AWK and WTRG
+bestfit(risk_factor$AWK,risk_factor$WTRG)
+lambda3<-lambda(tCopula(param = getTheta(copulaXt)[1],
+                        df=getTheta(copulaXt)[2],df.fixed = TRUE))
+lambda3
+
+set.seed(123)
+sim3<-rCopula(nrow(pseudoC),tCopula(param = getTheta(copulaXt)[1],
+                                    df=getTheta(copulaXt)[2],df.fixed = TRUE))
+par(mfrow=c(1,2),cex = 0.8)
+plot(pseudoC, xlab="AWK",ylab="WTRG",main="pseudo observations", family = "Times")
+plot(sim3, xlab="AWK",ylab="WTRG",main="simulations", family = "Times")
+
+# fit pair AAL and EGLE
+bestfit(risk_factor$AAL,risk_factor$EGLE)
+lambda4<-lambda(tCopula(param = getTheta(copulaXt)[1],
+                        df=getTheta(copulaXt)[2],df.fixed = TRUE))
+lambda4
+
+set.seed(123)
+sim4<-rCopula(nrow(pseudoC),tCopula(param = getTheta(copulaXt)[1],
+                                    df=getTheta(copulaXt)[2],df.fixed = TRUE))
+par(mfrow=c(1,2),cex = 0.8)
+plot(pseudoC, xlab="AAL",ylab="EGLE",main="pseudo observations", family = "Times")
+plot(sim4, xlab="AAL",ylab="EGLE",main="simulations", family = "Times")
+
+# fit copula with data before June 2019
+AAL_2019<-risk_factor$AAL["/2019-06"]
+EGLE_2019<-risk_factor$EGLE["/2019-06"]
+bestfit(AAL_2019,EGLE_2019)
+
+
+#################### (e) Loss and Risk Measures of Bivariate Pair ####################
+
+# losses for pair XEL and ED
+XEL.loss<-as.matrix((-1)*diff(stock_xts$XEL)[-1])
+ED.loss<-as.matrix((-1)*diff(stock_xts$ED)[-1])
+y<-cbind(XEL.loss,ED.loss)
+# get the degree of freedom of fitted t copula
+v<-getTheta(t1)[2]
+#consider only positive losses
+positiveloss_XEL<-XEL.loss[XEL.loss>0]
+positiveloss_ED<-ED.loss[ED.loss>0]
+
+# fit Pareto distribution to data
+marginfit_XEL<-fitdist(positiveloss_XEL,"pareto")
+marginfit_ED<-fitdist(positiveloss_ED,"pareto")
+# find the joint distribution model
+jointcdf<-mvdc(tCopula(param = getTheta(t1)[1],dim = 2,df = v,df.fixed = TRUE),
+               margins = c("pareto","pareto"),
+               paramMargins = list(list(shape = marginfit_XEL$estimate[1],
+                                        scale = marginfit_XEL$estimate[2]),
+                                   list(shape = marginfit_ED$estimate[1],
+                                        scale = marginfit_ED$estimate[2])))
+
+# test our joint distribution model
+positivepair<-y[y[,1]>0 & y[,2]>0,]
+set.seed(123)
+sim_jointmodel<-rMvdc(nrow(positivepair),jointcdf)
+df1<- as.data.frame(sim_jointmodel)
+df2<- as.data.frame(positivepair)
+ggplot(df1) + geom_point(aes(V1,V2), colour = "red") + xlab("XEL") + ylab("ED") +
+  ggtitle("Simulations") + theme_light() + theme(text=element_text(family="Times"))
+ggplot(df2) + geom_point(aes(XEL,ED)) + xlab("XEL") + ylab("ED") +
+  ggtitle("Historical Data") + theme_light() + theme(text=element_text(family="Times"))
+
+# use Monte Carlo method to estimate expected shortfall
+set.seed(123)
+sim_loss<-rMvdc(1000,jointcdf)
+aggregateloss<-rowSums(sim_loss)
+myES_t<-function(alpha){
+  # compute quantiles of our simulated data
+  q<-quantile(aggregateloss,probs = alpha)
+  # the estimated expected shortfall converges to its true value when n is large
+  mean(aggregateloss[aggregateloss>=q])
+}
+# vectorize the ES function so that it accepts inputs in vector
+myES_t<- Vectorize(myES_t)
+# expected shortfall of t copula
+ES_t<-myES_t(c(seq(0.1,0.8,0.1),seq(0.9,1,0.01)))
+ES_t
+set.seed(123)
+# expected shortfall of Gumbel copula with theta=Inf
+myES_gumbel<-function(alpha){
+  r1<-rpareto(1000,shape = marginfit_XEL$estimate[1],scale = marginfit_XEL$estimate[2])
+  r2<-rpareto(1000,shape = marginfit_ED$estimate[1],scale = marginfit_ED$estimate[2])
+  mean(r1[r1>=quantile(r1,probs = alpha)])+mean(r2[r2>=quantile(r2,probs = alpha)])
+}
+myES_gumbel<-Vectorize(myES_gumbel)
+ES_gumbel<-myES_gumbel(c(seq(0.1,0.8,0.1),seq(0.9,1,0.01)))
+ES_gumbel
+loss<-rowSums(positivepair)
+alpha<-c(seq(0.1,0.8,0.1),seq(0.9,1,0.01))
+# compare with expected shortfall of the aggregate loss of our data
+ES_data<-1:length(alpha)
+for(i in 1:length(alpha)){
+  ES_data[i]<-mean(loss[loss>=quantile(loss,probs = alpha[i])])
+}
+ES_data
+
+
+########################## (f) Principal Component Analysis ##########################
+
+# Calculate principal components
+PCA <- prcomp(risk_factor)
+summary(PCA)
+PCA$rotation
+PC1 <- PCA$x[,'PC1']
+PC2 <- PCA$x[,'PC2']
+
+# choose the most relevant stock in PC2
+which.max(abs(PCA$rotation[,"PC2"])) # FTEK
+
+plot(PCA, family = "Times") # plot variances
+
+X = matrix(data = c(as.matrix(risk_factor[,'FTEK'])[,1], PC1), ncol=2)
+X <- X[X[,1]!=0 & X[,2] !=0,]*(-1)
+
+# data visualisation: plot density function
+df <- data.frame(a=c(X[,1],X[,2]), Stock = c(rep('FTEK',1282),rep('PC1',1282)))
+ggplot(data=df, aes(x=a, group=Stock, fill=Stock)) +
+  geom_density() + theme(text=element_text(family="Times")) + 
+  xlim(-0.5, 0.5) + xlab(' ') + ylab('Density') +
+  facet_wrap(~Stock)
+
+# empirical distribution
+ecdf1 <- ecdf(X[,1])
+ecdf1 <- ecdf1(X[,1])*nrow(X)/(nrow(X)+1)
+ecdf2 <- ecdf(X[,2])
+ecdf2 <- ecdf2(X[,2])*nrow(X)/(nrow(X)+1)
+pseudoC <- cbind(ecdf1, ecdf2)
+max(pseudoC)
+
+# perform the asymptotic independence test
+BiCopIndTest(pseudoC[,1],pseudoC[,2])
+
+# fit pairs to gaussian, t, gumbel, clayton, and frank copulas
+BiCopSelect(pseudoC[,1],pseudoC[,2], familyset = c(0,1,2,3,4,5),
+            selectioncrit = "AIC", indeptest = FALSE, level = 0.05, weights = NA,
+            rotations = TRUE, se = FALSE, presel = TRUE, method = "mle")
+a0<-as.numeric(c(cor(pseudoC,method = "kendall")[1,2],
+                 cor(pseudoC,method = "spearman")[1,2],NA,NA))
+
+# Gaussian
+# set starting point
+gatheta<-cor(pseudoC,method = "pearson")[1,2]
+# fit copulas to data
+copulaXGauss <<- fitCopula(normalCopula(dim = 2,dispstr = "un"),
+                           data=pseudoC, start=gatheta,method = "mpl")
+a1<-as.numeric(c(tau(normalCopula(getTheta(copulaXGauss),dim = 2)),
+                 getTheta(copulaXGauss),
+                 copulaXGauss@loglik,
+                 AIC(copulaXGauss)))
+
+# t copula
+copulaXt <<- fitCopula(tCopula(dim = 2,dispstr = "un"),data = pseudoC,hideWarnings=TRUE,method = "mpl")
+a2<-as.numeric(c(tau(tCopula(getTheta(copulaXt)[1],
+                             df=getTheta(copulaXt)[2],df.fixed = TRUE)),
+                 getTheta(copulaXt)[1],
+                 copulaXt@loglik,
+                 AIC(copulaXt)))
+
+# Gumbel
+gtheta<<-iTau(gumbelCopula(dim = 2),cor(pseudoC,method="kendall")[1,2])
+copulaXgumbel<<- fitCopula(gumbelCopula(dim=2),
+                           data = pseudoC, start=gtheta,method = "mpl")
+a3<-as.numeric(c(tau(gumbelCopula(param = getTheta(copulaXgumbel),dim = 2)),
+                 rho(gumbelCopula(param = getTheta(copulaXgumbel),dim = 2)),
+                 copulaXgumbel@loglik,
+                 AIC(copulaXgumbel)))
+
+# Clayton
+ctheta<<-iTau(claytonCopula(dim = 2),cor(pseudoC,method="kendall")[1,2])
+copulaXclayton<<- tryCatch(fitCopula(claytonCopula(dim = 2), 
+                                     data = pseudoC, start=ctheta,method = "mpl"),
+                           error=function(e)NA)
+a4<-as.numeric(c(tryCatch(tau(claytonCopula(param = getTheta(copulaXclayton),
+                                            dim = 2)), error=function(e)NA),
+                 tryCatch(rho(claytonCopula(param = getTheta(copulaXclayton),
+                                            dim = 2)), error=function(e)NA),
+                 tryCatch(copulaXclayton@loglik, error = function(e)NA),
+                 tryCatch(AIC(copulaXclayton), error = function(e)NA)))
+ftheta<<- iTau(frankCopula(dim=2), cor(pseudoC, method = "kendall")[1,2])
+
+# Frank
+copulaXfrank<<- fitCopula(frankCopula(dim = 2),
+                          data = pseudoC, start=ftheta, method = "mpl")
+a5<-as.numeric(c(tau(frankCopula(param = getTheta(copulaXfrank), dim = 2)),
+                 rho(frankCopula(param = getTheta(copulaXfrank), dim = 2)),
+                 copulaXfrank@loglik,
+                 AIC(copulaXfrank)))
+
+# copulas with rank correlations, maximum log likelihood, and AIC
+my_matrix<-rbind(a0,a1,a2,a3,a4,a5)
+rownames(my_matrix)<-c("pseudoC","gauss","t","gumbel","clayton","frank")
+colnames(my_matrix)<-c("Tau","Rho","max. loglikelihood","AIC")
+my_matrix
+
+# Simulate the best fitted t copula
+lambda1<-lambda(tCopula(param = getTheta(copulaXt)[1],
+                        df=getTheta(copulaXt)[2],df.fixed = TRUE))
+sim1<-rCopula(nrow(pseudoC),tCopula(param = getTheta(copulaXt)[1],
+                                    df=getTheta(copulaXt)[2],df.fixed = TRUE))
+par(mfrow=c(1,2))
+plot(pseudoC, xlab="FTEK",ylab="Comp.1",
+     main="empirical distribution \nof observations")
+plot(sim1, xlab="FTEK",ylab="Comp.1",
+     main="simulation of \nt copula")
+
+# For data before COVID-19, change data by:
+# stocks = stocks['2016-01-04/2020-01']
+# redo the above to fit copulas again, the best fitted copula changes to Frank Copula
+# simulate the best fitted Frank copula
+
+# getTheta(copulaXfrank)
+# lambda1<-lambda(frankCopula((param = getTheta(copulaXfrank))))
+# sim1<-rCopula(nrow(pseudoC),frankCopula(param = getTheta(copulaXfrank)))
+# par(mfrow=c(1,2))
+# plot(pseudoC, xlab="GE",ylab="Comp.1",
+# main="empirical distribution \nof observations")
+# plot(sim1, xlab="GE",ylab="Comp.1",
+# main="simulation of \nfrank copula")
